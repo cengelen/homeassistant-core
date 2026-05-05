@@ -167,19 +167,19 @@ async def test_switch_missing_data(
 
 
 @pytest.mark.usefixtures("entity_registry_enabled_by_default")
-async def test_no_switch_entities_for_non_min_devices(
+async def test_no_switch_entities_for_non_min_or_non_classic_devices(
     hass: HomeAssistant,
     mock_growatt_v1_api,
     mock_config_entry: MockConfigEntry,
     entity_registry: er.EntityRegistry,
 ) -> None:
-    """Test that switch entities are not created for non-MIN devices."""
-    # Mock a different device type (not MIN) - type 7 is MIN, type 8 is non-MIN
+    """Test that switch entities are not created for non-MIN or non-Classic devices."""
+    # Mock a different device type (not MIN) - type 7 is MIN, type 8 is non-MIN and non-Classic
     mock_growatt_v1_api.device_list.return_value = {
         "devices": [
             {
                 "device_sn": "TLX123456",
-                "type": 8,  # Non-MIN device type (MIN is type 7)
+                "type": 8,  # Non-MIN device type (MIN is type 7, Classic inverter is type 1)
             }
         ]
     }
@@ -200,25 +200,114 @@ async def test_no_switch_entities_for_non_min_devices(
     assert len(switch_entities) == 0
 
 
-@pytest.mark.usefixtures("entity_registry_enabled_by_default")
-async def test_no_switch_entities_for_classic_api(
+@pytest.mark.usefixtures("entity_registry_enabled_by_default", "init_integration")
+async def test_classic_inverter_switch_entities(
     hass: HomeAssistant,
-    mock_growatt_classic_api,
+    snapshot: SnapshotAssertion,
     mock_config_entry_classic: MockConfigEntry,
     entity_registry: er.EntityRegistry,
 ) -> None:
-    """Test that switch entities are not created for Classic API."""
-    # Mock device list to return no devices
-    mock_growatt_classic_api.device_list.return_value = []
+    """Test that switch entities are created for Classic inverters."""
+    await snapshot_platform(
+        hass, entity_registry, snapshot, mock_config_entry_classic.entry_id
+    )
 
+
+@pytest.mark.usefixtures("entity_registry_enabled_by_default", "init_integration")
+@pytest.mark.parametrize(
+    ("service", "expected_value"),
+    [
+        (SERVICE_TURN_ON, "0001"),
+        (SERVICE_TURN_OFF, "0000"),
+    ],
+)
+async def test_classic_inverter_switch_service_call_success(
+    hass: HomeAssistant,
+    mock_growatt_classic_api,
+    service: str,
+    expected_value: str,
+) -> None:
+    """Test Classic inverter switch service calls successfully."""
+    await hass.services.async_call(
+        SWITCH_DOMAIN,
+        service,
+        {ATTR_ENTITY_ID: "switch.classic123456_pv_on_off"},
+        blocking=True,
+    )
+
+    # Verify API was called with correct parameters
+    mock_growatt_classic_api.update_classic_inverter_setting.assert_called_once_with(
+        {
+            "action": "inverterSet",
+            "serialNum": "CLASSIC123456",
+        },
+        {
+            "paramId": "pv_on_off",
+            "command_1": expected_value,
+            "command_2": "",
+        },
+    )
+
+
+@pytest.mark.usefixtures("entity_registry_enabled_by_default", "init_integration")
+@pytest.mark.parametrize(
+    "service",
+    [SERVICE_TURN_ON, SERVICE_TURN_OFF],
+)
+async def test_classic_inverter_switch_service_call_api_error(
+    hass: HomeAssistant,
+    mock_growatt_classic_api,
+    service: str,
+) -> None:
+    """Test handling API error when calling Classic inverter switch services."""
+    # Mock API to raise error
+    mock_growatt_classic_api.update_classic_inverter_setting.side_effect = (
+        GrowattV1ApiError("API Error", GrowattV1ApiErrorCode.NO_PRIVILEGE, "API Error")
+    )
+
+    with pytest.raises(HomeAssistantError, match="Error while setting switch state"):
+        await hass.services.async_call(
+            SWITCH_DOMAIN,
+            service,
+            {"entity_id": "switch.classic123456_pv_on_off"},
+            blocking=True,
+        )
+
+
+@pytest.mark.usefixtures("entity_registry_enabled_by_default")
+async def test_classic_inverter_switch_state_handling(
+    hass: HomeAssistant,
+    mock_config_entry_classic: MockConfigEntry,
+    mock_growatt_classic_api,
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """Test Classic inverter switch state handling."""
+    # Set up integration
     mock_config_entry_classic.add_to_hass(hass)
-
-    assert await hass.config_entries.async_setup(mock_config_entry_classic.entry_id)
+    await hass.config_entries.async_setup(mock_config_entry_classic.entry_id)
     await hass.async_block_till_done()
 
-    # Should have no switch entities for classic API (no devices)
-    entity_entries = er.async_entries_for_config_entry(
-        entity_registry, mock_config_entry_classic.entry_id
-    )
-    switch_entities = [entry for entry in entity_entries if entry.domain == "switch"]
-    assert len(switch_entities) == 0
+    # Should interpret "0001" as ON (from default mock data)
+    state = hass.states.get("switch.classic123456_pv_on_off")
+    assert state is not None
+    assert state.state == STATE_ON
+
+    # Test with "0000" value
+    mock_growatt_classic_api.device_list.return_value = {
+        "devices": [
+            {
+                "device_sn": "CLASSIC123456",
+                "pv_on_off": "0000",  # String value
+            }
+        ]
+    }
+
+    # Advance time to trigger coordinator refresh
+    freezer.tick(SCAN_INTERVAL)
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    # Should interpret "0000" as OFF
+    state = hass.states.get("switch.classic123456_pv_on_off")
+    assert state is not None
+    assert state.state == STATE_OFF

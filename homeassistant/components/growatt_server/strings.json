@@ -588,6 +588,9 @@
     "switch": {
       "ac_charge": {
         "name": "Charge from grid"
+      },
+      "classic_pv_on_off": {
+        "name": "Inverter enabled"
       }
     }
   },
@@ -690,6 +693,20 @@
         }
       },
       "name": "Read time segments"
+    },
+    "set_classic_inverter_on_off": {
+      "description": "Turn a Growatt Classic inverter on or off.",
+      "fields": {
+        "inverter_id": {
+          "description": "The serial number of the inverter to control.",
+          "name": "Device sn"
+        },
+        "state": {
+          "description": "The desired state (on/off).",
+          "name": "State"
+        }
+      },
+      "name": "Set Growatt Classic Inverter State"
     },
     "update_time_segment": {
       "description": "Updates a time segment for supported inverters.",

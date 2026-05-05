@@ -26,10 +26,15 @@ PARALLEL_UPDATES = (
 
 @dataclass(frozen=True, kw_only=True)
 class GrowattSwitchEntityDescription(SwitchEntityDescription):
-    """Describes Growatt switch entity."""
+    """Describes Growatt v1 MIN switch entity."""
 
     api_key: str
     write_key: str | None = None  # Parameter ID for writing (if different from api_key)
+
+
+@dataclass(frozen=True, kw_only=True)
+class GrowattClassicInverterOnOffSwitchEntityDescription(SwitchEntityDescription):
+    """Describes Growatt Classic inverter on/off switch entity."""
 
 
 # Note that the Growatt V1 API uses different keys for reading and writing parameters.
@@ -41,6 +46,15 @@ MIN_SWITCH_TYPES: tuple[GrowattSwitchEntityDescription, ...] = (
         translation_key="ac_charge",
         api_key="acChargeEnable",  # Key returned by V1 API
         write_key="ac_charge",  # Key used to write parameter
+    ),
+)
+
+CLASSIC_INVERTER_SWITCH_TYPES: tuple[
+    GrowattClassicInverterOnOffSwitchEntityDescription, ...
+] = (
+    GrowattClassicInverterOnOffSwitchEntityDescription(
+        key="pv_on_off",
+        translation_key="classic_pv_on_off",
     ),
 )
 
@@ -64,9 +78,20 @@ async def async_setup_entry(
         for description in MIN_SWITCH_TYPES
     )
 
+    # Add switch entities for each Classic inverter
+    async_add_entities(
+        GrowattClassicInverterOnOffSwitch(device_coordinator, description)
+        for device_coordinator in runtime_data.devices.values()
+        if (
+            device_coordinator.device_type == "inverter"
+            and device_coordinator.api_version == "classic"
+        )
+        for description in CLASSIC_INVERTER_SWITCH_TYPES
+    )
+
 
 class GrowattSwitch(CoordinatorEntity[GrowattCoordinator], SwitchEntity):
-    """Representation of a Growatt switch."""
+    """Representation of a Growatt V1 MIN switch."""
 
     _attr_has_entity_name = True
     _attr_entity_category = EntityCategory.CONFIG
@@ -138,4 +163,82 @@ class GrowattSwitch(CoordinatorEntity[GrowattCoordinator], SwitchEntity):
 
         # Update the value in coordinator data (keep as integer like API returns)
         self.coordinator.data[self.entity_description.api_key] = api_value
+        self.async_write_ha_state()
+
+
+class GrowattClassicInverterOnOffSwitch(
+    CoordinatorEntity[GrowattCoordinator], SwitchEntity
+):
+    """Representation of a Growatt classic inverter switch."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.CONFIG
+    entity_description: GrowattClassicInverterOnOffSwitchEntityDescription
+
+    def __init__(
+        self,
+        coordinator: GrowattCoordinator,
+        description: GrowattClassicInverterOnOffSwitchEntityDescription,
+    ) -> None:
+        """Initialize the switch."""
+        super().__init__(coordinator)
+        self.entity_description = description
+        self._attr_unique_id = f"{coordinator.device_id}_{description.key}"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, coordinator.device_id)},
+            manufacturer="Growatt",
+            name=coordinator.device_id,
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return true if the switch is on."""
+        value = self.coordinator.data.get("onOff")
+        if value is None:
+            return None
+        return bool(value)
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Turn the switch on."""
+        await self._async_set_state(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Turn the switch off."""
+        await self._async_set_state(False)
+
+    async def _async_set_state(self, state: bool) -> None:
+        """Set the switch state."""
+        # 0001 to turn on, 0000 to turn off
+        api_value = "0001" if state else "0000"
+
+        try:
+            # Use Classic API to write parameter
+            await self.hass.async_add_executor_job(
+                self.coordinator.api.update_classic_inverter_setting,
+                {
+                    "action": "inverterSet",
+                    "serialNum": self.coordinator.device_id,
+                },
+                {
+                    "paramId": self.entity_description.key,
+                    "command_1": api_value,
+                    "command_2": "",  # Empty string for command_2 as not used
+                },
+            )
+        except GrowattV1ApiError as e:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="api_error",
+                translation_placeholders={"error": str(e)},
+            ) from e
+
+        # If no exception was raised, the write was successful
+        _LOGGER.debug(
+            "Set switch %s to %s",
+            self.entity_description.key,
+            api_value,
+        )
+
+        # Update onOff in coordinator data so is_on reflects the new state immediately
+        self.coordinator.data["onOff"] = int(state)
         self.async_write_ha_state()

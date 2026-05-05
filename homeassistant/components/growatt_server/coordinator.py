@@ -135,7 +135,13 @@ class GrowattCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug("Total info for plant %s: %r", self.plant_id, total_info)
             self.data = total_info
         elif self.device_type == "inverter":
-            self.data = self.api.inverter_detail(self.device_id)
+            try:
+                inverter_data = self.api.inverter_detail(self.device_id)
+                if self.api_version == "classic":
+                    inverter_info = self.api.classic_inverter_info(self.device_id)
+                    self.data = {**inverter_data, "onOff": inverter_info.get("onOff")}
+            except growattServer.GrowattV1ApiError as err:
+                raise UpdateFailed(f"Error fetching inverter data: {err}") from err
         elif self.device_type == "min":
             # Open API V1: min device
             try:
